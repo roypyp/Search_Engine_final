@@ -1,0 +1,170 @@
+import os
+import time
+
+import pandas as pd
+from gensim import similarities
+from gensim.corpora import Dictionary
+from gensim.models import LsiModel
+from gensim.models import TfidfModel
+from reader import ReadFile
+from configuration import ConfigClass
+from parser_module import Parse
+from indexer import Indexer
+from searcher import Searcher
+import utils
+
+
+# DO NOT CHANGE THE CLASS NAME
+class SearchEngine:
+
+    # DO NOT MODIFY THIS SIGNATURE
+    # You can change the internal implementation, but you must have a parser and an indexer.
+    def __init__(self, config=None):
+        self._config = config
+        persondic = utils.load_person_dict(config._model_dir)
+        self._parser = Parse(persondic)
+        self._indexer = Indexer(config)
+        self._model = None
+        self._dict = None
+        self.index = None
+
+    # DO NOT MODIFY THIS SIGNATURE
+    # You can change the internal implementation as you see fit.
+    def build_index_from_parquet(self, fn):
+        """
+        Reads parquet file and passes it to the parser, then indexer.
+        Input:
+            fn - path to parquet file
+        Output:
+            No output, just modifies the internal _indexer object.
+        """
+        df = pd.read_parquet(fn, engine="pyarrow")
+        documents_list = df.values.tolist()
+        # Iterate over every document in the file
+        self._parser.deletcorp()
+        number_of_documents = 0
+        for idx, document in enumerate(documents_list):
+            # parse the document
+            parsed_document = self._parser.parse_doc(document)
+            number_of_documents += 1
+            # index the document data
+            self._indexer.add_new_doc(parsed_document)
+        print('Finished parsing and indexing.')
+
+
+        # save the numbers of documents in the corpus
+        utils.save_obj(self._parser.tweetcount, 'lendoc')
+        utils.save_obj(self._indexer.DocmentInfo, "Docment_info")
+        utils.save_obj(self._parser.tweet2doc, "tweet2doc")
+       # print(len(self._indexer.inverted_idx))
+        #self._indexer.save_index()
+
+    # DO NOT MODIFY THIS SIGNATURE
+    # You can change the internal implementation as you see fit.
+    def load_index(self, fn):
+        """
+        Loads a pre-computed index (or indices) so we can answer queries.
+        Input:
+            fn - file name of pickled index.
+        """
+        self._indexer.load_index(fn)
+
+    # DO NOT MODIFY THIS SIGNATURE
+    # You can change the internal implementation as you see fit.
+    def load_precomputed_model(self, model_dir=None):
+        """
+        Loads a pre-computed model (or models) so we can answer queries.
+        This is where you would load models like word2vec, LSI, LDA, etc. and
+        assign to self._model, which is passed on to the searcher at query time.
+        """
+        self._dict = Dictionary.load(model_dir+"\\dictionary100k")
+        self._model = LsiModel.load(model_dir+"\\lsi100k")
+        self.initdata()
+
+    def initdata(self,newdocs=False):
+        """
+        this function creates MatrixSimilarity of the LSI model, with the iter Corpus we crate in the parser
+        :param newdocs:
+        :return:
+        """
+
+        starttime=time.time()
+        dictionary = self._dict
+        lsi=self._model
+        class MyCorpus:
+            def __iter__(self):
+                i=0
+                for line in utils.read_from_pickle("corp.pkl"):
+                    # assume there's one document per line, tokens separated by whitespace
+                    doc = dictionary.doc2bow(line)
+                    #temp = lsi[doc]
+                    #temp=sorted(temp,key=lambda item: -item[1] )
+                    #i+=1
+                    #print(i)
+                    yield doc
+
+        if (newdocs):
+            self._model.add_documents(MyCorpus(),chunksize=20000)
+
+        lennume=utils.load_obj('lendoc')#the number of tweets we save in the parser
+        #tfidf = TfidfModel(MyCorpus())
+       # corpus_tfidf = tfidf[MyCorpus()]
+        self.index = similarities.MatrixSimilarity(lsi[MyCorpus()],corpus_len=lennume)
+        #print(time.time()-starttime)
+
+    # DO NOT MODIFY THIS SIGNATURE
+    # You can change the internal implementation as you see fit.
+    def search(self, query,k=5):
+        """
+        Executes a query over an existing index and returns the number of
+        relevant docs and an ordered list of search results.
+        Input:
+            query - string.
+        Output:
+            A tuple containing the number of relevant search results, and
+            a list of tweet_ids where the first element is the most relavant
+            and the last is the least relevant result.
+        """
+        searcher = Searcher(self._parser, self._indexer, model=self._model,dict=self._dict,inx=self.index)
+        return searcher.search(query,engine=0)
+def main(queries='queries.txt',num_docs_to_retrieve=5):
+    config= ConfigClass()
+    engine= SearchEngine(config)
+    engine.build_index_from_parquet("data/benchmark_data_train.snappy.parquet")
+    engine.load_precomputed_model("model")
+    if isinstance(queries, list):
+        query = queries
+    else:
+        query = filetolist(queries)
+    k = num_docs_to_retrieve  # int(input("Please enter number of docs to retrieve: "))
+
+    i = 1
+    queries = pd.read_csv(os.path.join('data', 'queries_train.tsv'), sep='\t')
+    keywords = list(queries["keywords"])
+    df = pd.read_parquet("data/benchmark_data_train.snappy.parquet", engine="pyarrow")
+    temp = dict(df["tweet_id"])
+    temp = {val: key for key, val in temp.items()}
+    for q in keywords:
+        start_time = time.time()
+        for tweet in engine.search(q)[1][:5]:
+            if (i in [1, 2, 4, 7, 8]):
+                print(i)
+                print('tweet id: {}'.format(tweet))
+                print(df["full_text"][temp[tweet]])
+
+        i += 1
+        print(time.time() - start_time)
+
+def filetolist(q):
+    """
+    get a file path and make the file to a list of queries
+    :param q:
+    :return:
+    """
+    with open(q, encoding="utf-8") as f:
+        content = f.readlines()
+    query = []
+    for line in content:
+        if (line != "\n" and line != "" and line != " "):
+            query += [line.replace("\n", "")]
+    return query
